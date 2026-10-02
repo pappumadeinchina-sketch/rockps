@@ -1,0 +1,22 @@
+{
+  "name": "live-stream-monitor",
+  "version": "1.0.0",
+  "description": "Realtime telemetry stream monitor and event management dashboard",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "dashboard",
+    "realtime",
+    "telemetry",
+    "monitor"
+  ],
+  "type": "commonjs",
+  "dependencies": {
+    "bad-words": "^4.1.5",
+    "mineflayer": "^4.39.0",
+    "prismarine-chat": "^1.13.0",
+    "prismarine-nbt": "^2.6.0"
+  }
+}
