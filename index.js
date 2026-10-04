@@ -11,14 +11,11 @@ const { isMentioned, generateDryReply } = require('./aiResponder');
 const JOKES = require('./jokes.json');
 
 const PROMOS = [
-  "subscribe me on youtube -> @papppuchan",
-  "bhai log youtube pe @papppuchan search karke subscribe kar lo please <3",
-  "dil se request hai, youtube pe @papppuchan subscribe kar dena dosto :)",
-  "agar thode maze aaye ho toh yt: @papppuchan subscribe zaroor karna!",
-  "chota sa YouTuber hoon, please subscribe kar do yt -> @papppuchan",
-  "bhai ki thodi help kar do, youtube pe @papppuchan subscribe maar do!",
-  "youtube channel: @papppuchan | ek subscribe toh banta hai yaaro",
-  "support me on youtube guys -> @papppuchan (dil se shukriya)"
+  "papppuchan search kar lo dosto thoda support mil jayega",
+  "bhai log kabhi bore ho toh papppuchan dekh lena maze aayenge",
+  "dil se shukriya sabhi ko jo support karte hain",
+  "kisi ko acche jokes chahiye toh papppuchan search kar lena dosto",
+  "papppuchan ko support karo bhai log dil se pyaar milega"
 ];
 
 const CONFIG = {
@@ -30,8 +27,8 @@ const CONFIG = {
   auth: 'offline',
   viewDistance: 'far',
   actionDelay: 3000,
-  jokeInterval: 65000,
-  promoDelay: 10000,
+  jokeInterval: 75000,
+  promoDelay: 12000,
   defaultReconnectDelay: 25000,
   restartReconnectDelay: 45000,
   deniedReconnectDelay: 240000
@@ -41,6 +38,7 @@ let rl = null;
 let reconnectTimer = null;
 let jokeTimeout = null;
 let promoTimeout = null;
+let afkTransitionTimer = null;
 let jokeIndex = 0;
 let promoIndex = 0;
 let currentBot = null;
@@ -55,6 +53,8 @@ const botState = {
   inLifesteal: false,
   inQueue: false,
   hasWarpedAfk: false,
+  isMuted: false,
+  muteExpiryTimer: null,
   jokesSent: 0,
   aiRepliesSent: 0,
   lastKickReason: null,
@@ -66,7 +66,9 @@ const chatLogs = [];
 function addLog(type, text, html = null) {
   const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
   logIdCounter++;
-  chatLogs.push({ id: logIdCounter, time: timestamp, type, text, html });
+  const safeText = typeof text === 'string' ? text : (typeof text === 'object' ? JSON.stringify(text) : String(text || ''));
+  const safeHtml = typeof html === 'string' ? html : null;
+  chatLogs.push({ id: logIdCounter, time: timestamp, type, text: safeText, html: safeHtml });
   if (chatLogs.length > 300) chatLogs.shift();
 }
 
@@ -444,12 +446,16 @@ function stopJokeLoop() {
 
 function startJokeLoop(bot) {
   stopJokeLoop();
+  if (botState.isMuted) {
+    console.log(`\x1b[33m[Joke Broadcaster] Bot is currently muted. Chat paused, continuing silent AFK farming.\x1b[0m`);
+    return;
+  }
   console.log(`\n\x1b[32m[Joke Broadcaster] Activated! Jokes every ${CONFIG.jokeInterval / 1000}s, promo after ${CONFIG.promoDelay / 1000}s.\x1b[0m`);
   addLog('SYSTEM', `Joke broadcaster started. Broadcasting every ${CONFIG.jokeInterval / 1000}s.`);
 
   function scheduleNextJoke() {
     jokeTimeout = setTimeout(() => {
-      if (!bot || !bot.player || !botState.connected) return;
+      if (!bot || !bot.player || !botState.connected || botState.isMuted) return;
 
       const joke = JOKES[jokeIndex % JOKES.length];
       jokeIndex++;
@@ -459,9 +465,9 @@ function startJokeLoop(bot) {
       addLog('JOKE', joke);
       bot.chat(joke);
 
-      // Wait 10 seconds (safe from Ash Guard speed limit), then send varied promo
+      // Wait safe interval, then send varied promo
       promoTimeout = setTimeout(() => {
-        if (!bot || !bot.player || !botState.connected) return;
+        if (!bot || !bot.player || !botState.connected || botState.isMuted) return;
         const promo = PROMOS[promoIndex % PROMOS.length];
         promoIndex++;
 
@@ -475,10 +481,10 @@ function startJokeLoop(bot) {
     }, CONFIG.jokeInterval);
   }
 
-  // First joke 15s after settling in AFK zone
+  // First joke 20s after settling in AFK zone
   jokeTimeout = setTimeout(() => {
     scheduleNextJoke();
-  }, 15000);
+  }, 20000);
 }
 
 // ----------------------------------------------------
@@ -592,45 +598,74 @@ function startBot() {
     setupConsoleInput(bot);
   });
 
+  // Handle trigger sequence to warp to AFK zone and drop into 0.5-block hole
+  function triggerAfkZoneSequence(targetBot) {
+    if (botState.hasWarpedAfk || !botState.inLifesteal) return;
+    if (afkTransitionTimer) return; // Sequence already queued
+
+    console.log(`\x1b[36m[Bot] In Lifesteal! Teleporting to AFK Zone in 4s...\x1b[0m`);
+    addLog('SYSTEM', 'In Lifesteal. Preparing /warp afkzone in 4s...');
+
+    afkTransitionTimer = setTimeout(() => {
+      afkTransitionTimer = null;
+      if (botState.hasWarpedAfk || !botState.inLifesteal) return;
+      if (!targetBot || !targetBot._client) return;
+
+      botState.hasWarpedAfk = true;
+      botState.status = 'Warping to AFK Zone';
+      console.log(`\x1b[32m[Bot] Executing: /warp afkzone\x1b[0m`);
+      addLog('SYSTEM', 'Executing: /warp afkzone');
+      targetBot.chat('/warp afkzone');
+
+      // Wait 3s for teleportation & chunk load
+      setTimeout(() => {
+        if (!targetBot || !targetBot.entity) return;
+        console.log(`\x1b[36m[Bot] Teleported to AFK Zone. Walking forward into the 0.5-block hole...\x1b[0m`);
+        addLog('SYSTEM', 'Walking forward into AFK hole...');
+
+        // Face straight forward
+        try {
+          targetBot.look(targetBot.entity.yaw, 0, true);
+        } catch (e) {}
+
+        // Walk forward for 2.2 seconds to drop right into the hole
+        targetBot.setControlState('forward', true);
+
+        setTimeout(() => {
+          targetBot.setControlState('forward', false);
+          botState.status = 'AFK in AFK Hole';
+          console.log(`\x1b[32m[Bot] In AFK hole! Staying completely still to farm shards.\x1b[0m`);
+          addLog('SYSTEM', 'In AFK hole! Completely still. Shards farming active.');
+          if (!botState.isMuted) {
+            startJokeLoop(targetBot);
+          }
+        }, 2200);
+      }, 3000);
+    }, 4000);
+  }
+
+  bot.on('respawn', () => {
+    console.log(`[Bot] Dimension / World respawn event received.`);
+    addLog('SYSTEM', 'World respawn event received.');
+    if (botState.inLifesteal && !botState.hasWarpedAfk) {
+      triggerAfkZoneSequence(bot);
+    }
+  });
+
   bot.on('spawn', () => {
     bot.physicsEnabled = true;
     console.log(`[Bot] Spawned in world at: ${bot.entity.position}`);
     addLog('SYSTEM', `Spawned in world at: ${bot.entity.position}`);
 
-    // Human-like actions to immediately pass anti-bot / headless client check
+    // Human-like actions to pass anti-bot / headless client check
     try {
       bot.swingArm();
       bot.look(0, 0, true);
     } catch (e) {}
 
-    // Trigger /warp afkzone ONLY after confirmed spawn in Lifesteal
+    // Trigger /warp afkzone if in Lifesteal
     if (botState.inLifesteal && !botState.hasWarpedAfk) {
-      console.log(`\x1b[36m[Bot] Lifesteal world fully loaded! Waiting 3s before /warp afkzone...\x1b[0m`);
-      setTimeout(() => {
-        if (botState.inLifesteal && !botState.hasWarpedAfk) {
-          botState.hasWarpedAfk = true;
-          botState.status = 'Warping to AFK Zone';
-          console.log(`\x1b[32m[Bot] Executing: /warp afkzone\x1b[0m`);
-          bot.chat('/warp afkzone');
-          addLog('SYSTEM', 'Warped to AFK zone. Walking into the AFK hole in 2s...');
-
-          // Wait 2s for teleport to complete, then walk forward into the AFK pool/hole
-          setTimeout(() => {
-            console.log(`\x1b[36m[Bot] Walking forward into the AFK hole...\x1b[0m`);
-            addLog('SYSTEM', 'Walking forward into the AFK hole...');
-            bot.setControlState('forward', true);
-
-            // Walk forward for 1.8 seconds so it drops securely into the hole
-            setTimeout(() => {
-              bot.setControlState('forward', false);
-              botState.status = 'AFK in AFK Hole';
-              console.log(`\x1b[32m[Bot] In AFK hole! Staying completely still.\x1b[0m`);
-              addLog('SYSTEM', 'Safely in AFK hole! Staying still.');
-              startJokeLoop(bot);
-            }, 1800);
-          }, 2000);
-        }
-      }, CONFIG.actionDelay);
+      triggerAfkZoneSequence(bot);
     }
   });
 
@@ -665,9 +700,26 @@ function startBot() {
       const raw = jsonMsg.toString();
       const filtered = cleanChat(raw);
 
-      // Render full in-game Minecraft colors!
-      let ansiFormatted = jsonMsg.toAnsi ? jsonMsg.toAnsi() : filtered;
-      let htmlFormatted = jsonMsg.toHTML ? jsonMsg.toHTML() : null;
+      // Render full in-game Minecraft colors without [object Object] leaks
+      let ansiFormatted = filtered;
+      try {
+        if (typeof jsonMsg.toAnsi === 'function') {
+          const res = jsonMsg.toAnsi();
+          if (typeof res === 'string' && !res.includes('[object Object]')) {
+            ansiFormatted = res;
+          }
+        }
+      } catch {}
+
+      let htmlFormatted = null;
+      try {
+        if (typeof jsonMsg.toHTML === 'function') {
+          const res = jsonMsg.toHTML();
+          if (typeof res === 'string' && !res.includes('[object Object]')) {
+            htmlFormatted = res;
+          }
+        }
+      } catch {}
 
       if (filtered !== raw) {
         ansiFormatted = cleanChat(ansiFormatted);
@@ -678,6 +730,21 @@ function startBot() {
       addLog('CHAT', filtered, htmlFormatted);
 
       const lowerRaw = raw.toLowerCase();
+
+      // Detect Ash Guard mute
+      if (raw.includes('You were muted') || raw.includes('Staff: AshRarity') || raw.includes('cannot talk while muted')) {
+        botState.isMuted = true;
+        console.log(`\n\x1b[31m[Ash Guard Mute Detected] Bot is muted. Staying silent in AFK hole to farm shards.\x1b[0m\n`);
+        addLog('SYSTEM', 'Bot is muted. Chat paused. Continuing AFK shard farming...');
+        stopJokeLoop();
+        if (botState.muteExpiryTimer) clearTimeout(botState.muteExpiryTimer);
+        botState.muteExpiryTimer = setTimeout(() => {
+          botState.isMuted = false;
+          console.log(`\x1b[32m[Ash Guard] Mute period ended. Chat resuming.\x1b[0m`);
+          addLog('SYSTEM', 'Mute period ended. Chat resuming.');
+          if (botState.hasWarpedAfk) startJokeLoop(bot);
+        }, 47 * 60 * 1000);
+      }
 
       // 1. Auto-login when prompted
       if (!botState.hasLoggedIn && (raw.includes('/login') || lowerRaw.includes('login using'))) {
@@ -712,6 +779,19 @@ function startBot() {
         botState.inQueue = false;
         botState.inLifesteal = true;
         botState.status = 'In Lifesteal';
+        triggerAfkZoneSequence(bot);
+      }
+
+      // Also detect if we are seeing Lifesteal in-game messages
+      if (!botState.hasWarpedAfk && (
+        raw.includes('was killed by') ||
+        raw.includes('Item cleanup') ||
+        raw.includes('voted on Minecraft') ||
+        (raw.includes('☀') && raw.includes('»'))
+      )) {
+        botState.inQueue = false;
+        botState.inLifesteal = true;
+        triggerAfkZoneSequence(bot);
       }
 
       // 5. Detect if Lifesteal is OFFLINE or RESTARTING
@@ -726,6 +806,7 @@ function startBot() {
         addLog('SYSTEM', 'Lifesteal server is offline/rebooting. Auto-reconnect active...');
         botState.inQueue = false;
         botState.inLifesteal = false;
+        botState.hasWarpedAfk = false;
         botState.status = 'In Hub (Lifesteal Offline)';
       }
 
@@ -760,20 +841,20 @@ function startBot() {
               botState.status = 'AFK in AFK Hole';
               console.log(`\x1b[32m[Bot] In AFK hole! Staying completely still.\x1b[0m`);
               addLog('SYSTEM', 'In AFK hole! Staying completely still.');
-              startJokeLoop(bot);
-            }, 1800);
+              if (!botState.isMuted) startJokeLoop(bot);
+            }, 2200);
           }, 1000);
         }
       }
 
       // 8. Groq AI: Cute, heartbroken replies with player name tag and anti-duplicate check
-      if (botState.connected && isMentioned(raw, CONFIG.username)) {
+      if (botState.connected && !botState.isMuted && botState.hasWarpedAfk && isMentioned(raw, CONFIG.username)) {
         console.log(`\n\x1b[35m[Mention Detected] Someone mentioned you: "${filtered}"\x1b[0m`);
         addLog('SYSTEM', `Mention detected: "${filtered}"`);
         const reply = await generateDryReply(raw);
-        if (reply && bot && bot.player) {
+        if (reply && bot && bot.player && !botState.isMuted) {
           setTimeout(() => {
-            if (bot && bot.player) {
+            if (bot && bot.player && !botState.isMuted) {
               console.log(`\x1b[35m[Groq AI Reply]\x1b[0m ${reply}\n`);
               addLog('AI', reply);
               bot.chat(reply);
