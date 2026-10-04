@@ -1,4 +1,5 @@
 const mineflayer = require('mineflayer');
+const readline = require('readline');
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
@@ -36,6 +37,7 @@ const CONFIG = {
   deniedReconnectDelay: 240000
 };
 
+let rl = null;
 let reconnectTimer = null;
 let jokeTimeout = null;
 let promoTimeout = null;
@@ -61,14 +63,50 @@ const botState = {
 
 // Rolling in-memory log buffer for live web console
 const chatLogs = [];
-function addLog(type, text) {
+function addLog(type, text, html = null) {
   const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
   logIdCounter++;
-  chatLogs.push({ id: logIdCounter, time: timestamp, type, text });
+  chatLogs.push({ id: logIdCounter, time: timestamp, type, text, html });
   if (chatLogs.length > 300) chatLogs.shift();
 }
 
 addLog('SYSTEM', 'AFK Bot System initialized. Ready to connect.');
+
+// ----------------------------------------------------
+// Terminal Console Keyboard Input (Type and hit Enter!)
+// ----------------------------------------------------
+function setupConsoleInput(bot) {
+  if (rl) {
+    try { rl.close(); } catch {}
+    rl = null;
+  }
+
+  try {
+    rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      prompt: '> '
+    });
+
+    rl.on('line', (line) => {
+      const text = line.trim();
+      if (text.length > 0) {
+        if (currentBot && currentBot._client) {
+          currentBot.chat(text);
+          console.log(`[You] ${text}`);
+          addLog('SENT', text);
+        } else {
+          console.log(`[Notice] Bot is not connected right now. Please wait.`);
+        }
+      }
+      try { rl.prompt(); } catch {}
+    });
+
+    rl.prompt();
+  } catch (e) {
+    // Non-interactive environment fallback
+  }
+}
 
 // ----------------------------------------------------
 // Built-in Web Dashboard & Status Server (with inline fallback)
@@ -119,6 +157,8 @@ const EMBEDDED_DASHBOARD_HTML = `<!DOCTYPE html>
     .tag-promo { background: rgba(239, 68, 68, 0.2); color: var(--red); }
     .tag-ai { background: rgba(168, 85, 247, 0.2); color: var(--purple); }
     .tag-system { background: rgba(56, 189, 248, 0.2); color: var(--accent); }
+    .tag-sent { background: rgba(34, 197, 94, 0.2); color: var(--green); }
+    .tag-title { background: rgba(251, 191, 36, 0.2); color: #fbbf24; }
     .log-msg { flex: 1; color: #e2e8f0; }
     .log-msg.highlight-ai { color: #d8b4fe; font-weight: 600; }
     .log-msg.highlight-joke { color: #fde047; }
@@ -168,7 +208,7 @@ const EMBEDDED_DASHBOARD_HTML = `<!DOCTYPE html>
     </div>
 
     <form id="chatForm" class="input-bar">
-      <input type="text" id="chatInput" placeholder="Type a chat message or command (e.g. /spawn, hello guys)..." autocomplete="off">
+      <input type="text" id="chatInput" placeholder="Type a chat message or command (e.g. /spawn, /lifesteal, hello)..." autocomplete="off">
       <button type="submit">Send</button>
     </form>
   </main>
@@ -241,11 +281,16 @@ const EMBEDDED_DASHBOARD_HTML = `<!DOCTYPE html>
         else if (item.type === 'PROMO') { tagClass = 'tag-promo'; highlightClass = 'highlight-promo'; }
         else if (item.type === 'AI') { tagClass = 'tag-ai'; highlightClass = 'highlight-ai'; }
         else if (item.type === 'SYSTEM') { tagClass = 'tag-system'; }
+        else if (item.type === 'SENT') { tagClass = 'tag-sent'; }
+        else if (item.type === 'TITLE') { tagClass = 'tag-title'; }
+
+        // Render full colored HTML if available, otherwise safe text
+        const content = item.html || escapeHtml(item.text);
 
         line.innerHTML = 
           '<span class="log-time">' + item.time + '</span>' +
           '<span class="tag ' + tagClass + '">' + item.type + '</span>' +
-          '<span class="log-msg ' + highlightClass + '">' + escapeHtml(item.text) + '</span>';
+          '<span class="log-msg ' + highlightClass + '">' + content + '</span>';
         logsEl.appendChild(line);
       });
 
@@ -264,16 +309,21 @@ const EMBEDDED_DASHBOARD_HTML = `<!DOCTYPE html>
       e.preventDefault();
       const text = chatInput.value.trim();
       if (!text) return;
-      chatInput.value = '';
 
       try {
-        await fetch('/api/send', {
+        const res = await fetch('/api/send', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ message: text })
         });
+        const result = await res.json();
+        if (!res.ok) {
+          alert(result.error || 'Failed to send message.');
+        } else {
+          chatInput.value = '';
+        }
       } catch (err) {
-        alert('Failed to send message: ' + err.message);
+        alert('Failed to send: ' + err.message);
       }
     });
 
@@ -318,13 +368,21 @@ const server = http.createServer((req, res) => {
     req.on('end', () => {
       try {
         const { message } = JSON.parse(body);
-        if (message && currentBot && currentBot.player) {
+        if (!message || message.trim().length === 0) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'Message cannot be empty.' }));
+        }
+
+        if (currentBot && currentBot._client) {
           currentBot.chat(message);
           addLog('SENT', message);
           console.log(`[Web Sent] ${message}`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ success: true }));
+        } else {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          return res.end(JSON.stringify({ error: 'Bot is not connected to server yet.' }));
         }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true }));
       } catch (err) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));
@@ -339,7 +397,7 @@ const server = http.createServer((req, res) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[Web Server] Live chat dashboard listening on port ${PORT}`);
+  console.log(`[Web Dashboard] Live chat dashboard active at http://localhost:${PORT}`);
 });
 
 // Self-ping to prevent Render free tier from idling
@@ -348,7 +406,7 @@ if (RENDER_URL) {
   console.log(`[Self-Ping] Enabled for: ${RENDER_URL}`);
   setInterval(() => {
     https.get(`${RENDER_URL}/api/status`, () => {}).on('error', () => {});
-  }, 10 * 60 * 1000); // 10 mins
+  }, 10 * 60 * 1000);
 }
 
 function parseText(obj) {
@@ -386,7 +444,7 @@ function stopJokeLoop() {
 
 function startJokeLoop(bot) {
   stopJokeLoop();
-  console.log(`\n[Joke Broadcaster] Activated! Jokes every ${CONFIG.jokeInterval / 1000}s, promo after ${CONFIG.promoDelay / 1000}s.`);
+  console.log(`\n\x1b[32m[Joke Broadcaster] Activated! Jokes every ${CONFIG.jokeInterval / 1000}s, promo after ${CONFIG.promoDelay / 1000}s.\x1b[0m`);
   addLog('SYSTEM', `Joke broadcaster started. Broadcasting every ${CONFIG.jokeInterval / 1000}s.`);
 
   function scheduleNextJoke() {
@@ -397,7 +455,7 @@ function startJokeLoop(bot) {
       jokeIndex++;
       botState.jokesSent = jokeIndex;
 
-      console.log(`\n[Joke #${jokeIndex}/${JOKES.length}] ${joke}`);
+      console.log(`\n\x1b[33m[Joke #${jokeIndex}/${JOKES.length}]\x1b[0m ${joke}`);
       addLog('JOKE', joke);
       bot.chat(joke);
 
@@ -407,7 +465,7 @@ function startJokeLoop(bot) {
         const promo = PROMOS[promoIndex % PROMOS.length];
         promoIndex++;
 
-        console.log(`[Promo] ${promo}\n`);
+        console.log(`\x1b[31m[Promo]\x1b[0m ${promo}\n`);
         addLog('PROMO', promo);
         bot.chat(promo);
 
@@ -440,7 +498,7 @@ function startLifestealMonitor(bot) {
 
     // If logged in, but not in Lifesteal and not in queue:
     if (botState.hasLoggedIn && !botState.inLifesteal && !botState.inQueue) {
-      console.log(`[Lifesteal Monitor] Auto-checking if Lifesteal is back online: /lifesteal`);
+      console.log(`\x1b[36m[Lifesteal Monitor] Auto-checking if Lifesteal is back online: /lifesteal\x1b[0m`);
       addLog('SYSTEM', 'Lifesteal not active. Auto-checking if online via /lifesteal...');
       bot.chat('/lifesteal');
     }
@@ -478,6 +536,7 @@ function startBot() {
     brand: CONFIG.brand,
     auth: CONFIG.auth,
     viewDistance: CONFIG.viewDistance,
+    checkTimeoutInterval: 90 * 1000, // 90s keepalive to survive server lag spikes!
     skinParts: {
       showCape: true,
       showJacket: true,
@@ -491,6 +550,7 @@ function startBot() {
   });
 
   currentBot = bot;
+  setupConsoleInput(bot);
 
   // Handle anti-bot verification challenge GUI / Inventory if sent
   bot.on('windowOpen', (window) => {
@@ -499,7 +559,6 @@ function startBot() {
     setTimeout(() => {
       try {
         bot.clickWindow(0, 0, 0);
-        console.log(`[Anti-Bot Window] Clicked slot 0.`);
       } catch (e) {}
     }, 1000);
   });
@@ -527,9 +586,10 @@ function startBot() {
   bot.on('login', () => {
     botState.connected = true;
     botState.status = 'Proxy Connected';
-    console.log(`[Bot] Logged into server proxy. Waiting for spawn...`);
+    console.log(`\x1b[32m[Bot] Logged into server proxy. Waiting for spawn...\x1b[0m`);
     addLog('SYSTEM', 'Logged into server proxy. Waiting for spawn...');
     startLifestealMonitor(bot);
+    setupConsoleInput(bot);
   });
 
   bot.on('spawn', () => {
@@ -545,29 +605,44 @@ function startBot() {
 
     // Trigger /warp afkzone ONLY after confirmed spawn in Lifesteal
     if (botState.inLifesteal && !botState.hasWarpedAfk) {
-      console.log(`[Bot] Lifesteal world fully loaded! Waiting 3s before /warp afkzone...`);
-      addLog('SYSTEM', 'Lifesteal world loaded. Warping to afkzone in 3s...');
+      console.log(`\x1b[36m[Bot] Lifesteal world fully loaded! Waiting 3s before /warp afkzone...\x1b[0m`);
       setTimeout(() => {
         if (botState.inLifesteal && !botState.hasWarpedAfk) {
           botState.hasWarpedAfk = true;
-          botState.status = 'AFK in AFK Zone';
-          console.log(`[Bot] Executing: /warp afkzone`);
+          botState.status = 'Warping to AFK Zone';
+          console.log(`\x1b[32m[Bot] Executing: /warp afkzone\x1b[0m`);
           bot.chat('/warp afkzone');
-          console.log(`[Bot] AFK zone reached! Staying completely still.`);
-          addLog('SYSTEM', 'AFK zone reached. Staying completely still.');
-          startJokeLoop(bot);
+          addLog('SYSTEM', 'Warped to AFK zone. Walking into the AFK hole in 2s...');
+
+          // Wait 2s for teleport to complete, then walk forward into the AFK pool/hole
+          setTimeout(() => {
+            console.log(`\x1b[36m[Bot] Walking forward into the AFK hole...\x1b[0m`);
+            addLog('SYSTEM', 'Walking forward into the AFK hole...');
+            bot.setControlState('forward', true);
+
+            // Walk forward for 1.8 seconds so it drops securely into the hole
+            setTimeout(() => {
+              bot.setControlState('forward', false);
+              botState.status = 'AFK in AFK Hole';
+              console.log(`\x1b[32m[Bot] In AFK hole! Staying completely still.\x1b[0m`);
+              addLog('SYSTEM', 'Safely in AFK hole! Staying still.');
+              startJokeLoop(bot);
+            }, 1800);
+          }, 2000);
         }
       }, CONFIG.actionDelay);
     }
   });
 
-  // Display server action bar
+  // Display server action bar with ANSI & HTML colors
   bot.on('actionBar', (actionbar) => {
     try {
-      const text = cleanChat(actionbar.toString().trim());
-      if (text.length > 0) {
-        console.log(`[ActionBar] ${text}`);
-        addLog('SYSTEM', `[ActionBar] ${text}`);
+      const plain = actionbar.toString().trim();
+      const ansi = actionbar.toAnsi ? actionbar.toAnsi().trim() : plain;
+      const html = actionbar.toHTML ? actionbar.toHTML().trim() : null;
+      if (plain.length > 0) {
+        console.log(`[ActionBar] ${ansi}`);
+        addLog('SYSTEM', `[ActionBar] ${plain}`, html);
       }
     } catch {}
   });
@@ -575,10 +650,10 @@ function startBot() {
   // Display server titles/action bars cleanly
   bot.on('title', (title) => {
     try {
-      const text = String(parseText(title) || '').trim();
-      if (text.length > 0) {
-        const cleaned = cleanChat(text);
-        console.log(`[Server Title] ${cleaned}`);
+      const plain = String(parseText(title) || '').trim();
+      if (plain.length > 0) {
+        const cleaned = cleanChat(plain);
+        console.log(`\x1b[33m[Server Title] ${cleaned}\x1b[0m`);
         addLog('TITLE', cleaned);
       }
     } catch {}
@@ -590,16 +665,24 @@ function startBot() {
       const raw = jsonMsg.toString();
       const filtered = cleanChat(raw);
 
-      // Print to both Console and Web Dashboard!
-      console.log(`[Chat] ${filtered}`);
-      addLog('CHAT', filtered);
+      // Render full in-game Minecraft colors!
+      let ansiFormatted = jsonMsg.toAnsi ? jsonMsg.toAnsi() : filtered;
+      let htmlFormatted = jsonMsg.toHTML ? jsonMsg.toHTML() : null;
+
+      if (filtered !== raw) {
+        ansiFormatted = cleanChat(ansiFormatted);
+      }
+
+      // Print colored text in CMD console & Web Dashboard
+      console.log(`[Chat] ${ansiFormatted}`);
+      addLog('CHAT', filtered, htmlFormatted);
 
       const lowerRaw = raw.toLowerCase();
 
       // 1. Auto-login when prompted
       if (!botState.hasLoggedIn && (raw.includes('/login') || lowerRaw.includes('login using'))) {
         botState.hasLoggedIn = true;
-        console.log(`[Bot] Login prompt detected. Waiting 3s before /login ggstime...`);
+        console.log(`\x1b[32m[Bot] Login prompt detected. Waiting 3s before /login ggstime...\x1b[0m`);
         addLog('SYSTEM', 'Login prompt detected. Executing: /login ggstime');
         setTimeout(() => {
           bot.chat('/login ggstime');
@@ -610,7 +693,7 @@ function startBot() {
       if (!botState.hasSentLifesteal && (lowerRaw.includes('successfully logged in') || raw.includes('Welcome pappuchan'))) {
         botState.hasLoggedIn = true;
         botState.hasSentLifesteal = true;
-        console.log(`[Bot] Login confirmed! Switching to /lifesteal in 3s...`);
+        console.log(`\x1b[32m[Bot] Login confirmed! Switching to /lifesteal in 3s...\x1b[0m`);
         addLog('SYSTEM', 'Login confirmed! Switching to /lifesteal in 3s...');
         setTimeout(() => {
           console.log(`[Bot] Executing: /lifesteal`);
@@ -639,7 +722,7 @@ function startBot() {
         lowerRaw.includes('failed to connect') ||
         lowerRaw.includes('maintenance')
       ) {
-        console.log(`\n[Lifesteal Monitor] Lifesteal is offline/rebooting. Will auto-retry until online...\n`);
+        console.log(`\n\x1b[31m[Lifesteal Monitor] Lifesteal is offline/rebooting. Will auto-retry until online...\x1b[0m\n`);
         addLog('SYSTEM', 'Lifesteal server is offline/rebooting. Auto-reconnect active...');
         botState.inQueue = false;
         botState.inLifesteal = false;
@@ -654,7 +737,7 @@ function startBot() {
           lowerRaw.includes('the server you were on was restarted') ||
           (lowerRaw.includes('hub-') && !lowerRaw.includes('left the hub') && !lowerRaw.includes('joined the hub'))
         ) {
-          console.log(`\n[Lifesteal Monitor] Lifesteal went offline/restarted! Returned to Hub. Auto-retrying /lifesteal...\n`);
+          console.log(`\n\x1b[33m[Lifesteal Monitor] Lifesteal restarted! Returned to Hub. Auto-retrying /lifesteal...\x1b[0m\n`);
           addLog('SYSTEM', 'Lifesteal restarted. Returned to Hub. Auto-retrying /lifesteal...');
           stopJokeLoop();
           botState.inLifesteal = false;
@@ -668,22 +751,30 @@ function startBot() {
       if (raw.includes('entered the AFK Zone') || raw.includes('AFK Zone')) {
         if (!botState.hasWarpedAfk) {
           botState.hasWarpedAfk = true;
-          botState.status = 'AFK in AFK Zone';
-          console.log(`[Bot] Verified: You are currently in the AFK Zone! No movement active.`);
-          addLog('SYSTEM', 'Verified in AFK Zone. Joke broadcaster starting.');
-          startJokeLoop(bot);
+          console.log(`\x1b[32m[Bot] Server announced AFK Zone. Moving into hole...\x1b[0m`);
+          addLog('SYSTEM', 'Entered AFK Zone. Moving into hole in 1s...');
+          setTimeout(() => {
+            bot.setControlState('forward', true);
+            setTimeout(() => {
+              bot.setControlState('forward', false);
+              botState.status = 'AFK in AFK Hole';
+              console.log(`\x1b[32m[Bot] In AFK hole! Staying completely still.\x1b[0m`);
+              addLog('SYSTEM', 'In AFK hole! Staying completely still.');
+              startJokeLoop(bot);
+            }, 1800);
+          }, 1000);
         }
       }
 
       // 8. Groq AI: Cute, heartbroken replies with player name tag and anti-duplicate check
       if (botState.connected && isMentioned(raw, CONFIG.username)) {
-        console.log(`\n[Mention Detected] Someone mentioned you: "${filtered}"`);
+        console.log(`\n\x1b[35m[Mention Detected] Someone mentioned you: "${filtered}"\x1b[0m`);
         addLog('SYSTEM', `Mention detected: "${filtered}"`);
         const reply = await generateDryReply(raw);
         if (reply && bot && bot.player) {
           setTimeout(() => {
             if (bot && bot.player) {
-              console.log(`[Groq AI Reply] ${reply}\n`);
+              console.log(`\x1b[35m[Groq AI Reply]\x1b[0m ${reply}\n`);
               addLog('AI', reply);
               bot.chat(reply);
               botState.aiRepliesSent++;
@@ -693,7 +784,7 @@ function startBot() {
       }
 
     } catch (e) {
-      console.log(`[Chat Error]`, e.message);
+      // Quiet handler for chat parse errors
     }
   });
 
@@ -702,7 +793,7 @@ function startBot() {
     stopLifestealMonitor();
     const kickText = String(parseText(reason) || '').trim();
     botState.lastKickReason = kickText;
-    console.log(`\n[Bot] Kicked from server.`);
+    console.log(`\n\x1b[31m[Bot] Kicked from server.\x1b[0m`);
     console.log(`----------------------------------------`);
     console.log(kickText);
     console.log(`----------------------------------------\n`);
@@ -731,7 +822,7 @@ function startBot() {
     // 4. IP Denied
     else if (lower.includes('denied from entering') || lower.includes('few minutes')) {
       nextReconnectDelay = CONFIG.deniedReconnectDelay;
-      console.log(`[ASH GUARD Active] Temporary rate limit. Pausing ${CONFIG.deniedReconnectDelay / 60000} mins.`);
+      console.log(`\x1b[31m[ASH GUARD Active] Temporary rate limit. Pausing ${CONFIG.deniedReconnectDelay / 60000} mins.\x1b[0m`);
       addLog('SYSTEM', `Ash Guard active. Pausing ${CONFIG.deniedReconnectDelay / 60000} mins.`);
     } else {
       nextReconnectDelay = CONFIG.defaultReconnectDelay;
@@ -741,7 +832,7 @@ function startBot() {
   bot.on('error', (err) => {
     stopJokeLoop();
     stopLifestealMonitor();
-    console.error(`\n[Bot] Connection error:`, err.message || err);
+    console.error(`\x1b[31m[Bot] Connection error:\x1b[0m`, err.message || err);
     addLog('SYSTEM', `Error: ${err.message || err}`);
     if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT') {
       nextReconnectDelay = CONFIG.restartReconnectDelay;
