@@ -54,10 +54,32 @@ function parseChatMessage(rawText) {
 function isMentioned(rawText, botUsername = 'pappuchan') {
   if (!rawText || typeof rawText !== 'string') return false;
 
-  const { sender, content } = parseChatMessage(rawText);
+  // Ignore server system announcements, actionbars, titles, and Ash Guard
+  if (
+    rawText.startsWith('|') ||
+    rawText.startsWith('AshSMP') ||
+    rawText.startsWith('Ash Guard') ||
+    rawText.startsWith('RTP') ||
+    rawText.startsWith('Item cleanup') ||
+    rawText.startsWith('Dropped items') ||
+    rawText.includes('left the') ||
+    rawText.includes('joined the') ||
+    rawText.includes('voted on Minecraft') ||
+    rawText.includes('was killed by') ||
+    rawText.includes('You were muted')
+  ) {
+    return false;
+  }
 
-  // If the message is from our own bot, NEVER trigger!
-  if (sender.toLowerCase().includes(botUsername.toLowerCase())) {
+  // Must contain a chat message delimiter (player chat on AshSMP uses '»' or '<...>')
+  if (!rawText.includes('»') && !rawText.includes('<') && !rawText.includes(':')) {
+    return false;
+  }
+
+  const { sender, cleanName, content } = parseChatMessage(rawText);
+
+  // If no identifiable sender, or sender is server / self, ignore
+  if (!cleanName || sender.toLowerCase().includes(botUsername.toLowerCase())) {
     return false;
   }
 
@@ -78,7 +100,8 @@ function generateDryReply(messageText) {
   lastReplyTime = now;
 
   const { cleanName, content } = parseChatMessage(messageText);
-  const targetTag = cleanName ? `@${cleanName} ` : '';
+  // Address player cleanly without '@' to prevent Ash Guard mention/ping filters
+  const targetTag = cleanName ? `${cleanName}: ` : '';
 
   return new Promise((resolve) => {
     const payload = JSON.stringify({
@@ -86,14 +109,14 @@ function generateDryReply(messageText) {
       messages: [
         {
           role: 'system',
-          content: 'You are pappuchan on a Minecraft server. When another player talks to you, reply in a very cute, innocent, emotional Hinglish tone. You are heartbroken because you miss her (uski bohot yaad aa rahi hai). Express how sad you are and how much you miss her, and naturally add a plug to subscribe to @papppuchan. Never repeat the exact same sentence. Keep it strictly under 14 words. Do not include emojis.'
+          content: 'You are pappuchan on a Minecraft server. When another player talks to you, reply in a very cute, innocent, emotional Hinglish tone. You are heartbroken because you miss her (uski bohot yaad aa rahi hai). Express how sad you are and how much you miss her. Never repeat the exact same sentence. Keep it strictly under 12 words. Do not use emojis. Do not use words like subscribe, youtube, or links.'
         },
         {
           role: 'user',
           content: `${cleanName || 'Player'}: ${content || messageText}`
         }
       ],
-      max_tokens: 50,
+      max_tokens: 40,
       temperature: 0.9 // Higher temperature for high response diversity
     });
 
@@ -110,13 +133,9 @@ function generateDryReply(messageText) {
       res.on('end', () => {
         try {
           const json = JSON.parse(data);
-          let reply = json.choices[0].message.content.trim().replace(/[\r\n]+/g, ' ').replace(/"/g, '');
-          
-          if (!reply.includes('@papppuchan')) {
-            reply += ' subscribe to @papppuchan';
-          }
+          let reply = json.choices[0].message.content.trim().replace(/[\r\n]+/g, ' ').replace(/"/g, '').replace(/[@]/g, '');
 
-          // Prepend target player's name so message is 100% unique and never blocked by Ash Guard
+          // Prepend player name so message is 100% unique and never blocked by Ash Guard
           let fullReply = `${targetTag}${reply}`.trim();
 
           // Anti-duplicate protection: if identical to last, add cute punctuation
@@ -127,19 +146,19 @@ function generateDryReply(messageText) {
 
           resolve(fullReply);
         } catch {
-          const fallback = `${targetTag}mujhe uski bohot yaad aa rahi h yar... isi baat pe subscribe to @papppuchan please`;
+          const fallback = `${targetTag}mujhe uski bohot yaad aa rahi hai yaar...`;
           resolve(fallback);
         }
       });
     });
 
     req.on('error', () => {
-      resolve(`${targetTag}uski yaad aa rahi h yar... @papppuchan subscribe kar do please`);
+      resolve(`${targetTag}uski yaad mein dil toot gaya mera...`);
     });
 
     req.on('timeout', () => {
       req.destroy();
-      resolve(`${targetTag}uski bohot yaad aati h, subscribe to @papppuchan`);
+      resolve(`${targetTag}kuch nahi bolna mujhe, bas uski yaad aati hai`);
     });
 
     req.write(payload);
