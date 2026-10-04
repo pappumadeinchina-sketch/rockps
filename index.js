@@ -598,12 +598,14 @@ function startBot() {
     setupConsoleInput(bot);
   });
 
+  let afkWalkTimeout = null;
+
   // Handle trigger sequence to warp to AFK zone and drop into 0.5-block hole
   function triggerAfkZoneSequence(targetBot) {
     if (botState.hasWarpedAfk || !botState.inLifesteal) return;
     if (afkTransitionTimer) return; // Sequence already queued
 
-    console.log(`\x1b[36m[Bot] In Lifesteal! Teleporting to AFK Zone in 4s...\x1b[0m`);
+    console.log(`\x1b[36m[Bot] In Lifesteal! Preparing /warp afkzone in 4s...\x1b[0m`);
     addLog('SYSTEM', 'In Lifesteal. Preparing /warp afkzone in 4s...');
 
     afkTransitionTimer = setTimeout(() => {
@@ -613,15 +615,24 @@ function startBot() {
 
       botState.hasWarpedAfk = true;
       botState.status = 'Warping to AFK Zone';
-      console.log(`\x1b[32m[Bot] Executing: /warp afkzone\x1b[0m`);
-      addLog('SYSTEM', 'Executing: /warp afkzone');
+
+      // Keep bot 100% still during warmup
+      try { targetBot.clearControlStates(); } catch {}
+
+      console.log(`\x1b[32m[Bot] Executing: /warp afkzone (standing still for 6.5s warmup)...\x1b[0m`);
+      addLog('SYSTEM', 'Executing: /warp afkzone (standing still for 6.5s warmup)...');
       targetBot.chat('/warp afkzone');
 
-      // Wait 3s for teleportation & chunk load
-      setTimeout(() => {
+      if (afkWalkTimeout) clearTimeout(afkWalkTimeout);
+
+      // Server warmup is 5 seconds ("Teleporting in 5 seconds... Do not move!").
+      // Wait 6.5s to let teleport & chunk load complete before moving!
+      afkWalkTimeout = setTimeout(() => {
         if (!targetBot || !targetBot.entity) return;
-        console.log(`\x1b[36m[Bot] Teleported to AFK Zone. Walking forward into the 0.5-block hole...\x1b[0m`);
-        addLog('SYSTEM', 'Walking forward into AFK hole...');
+        if (!botState.hasWarpedAfk) return; // Cancelled
+
+        console.log(`\x1b[36m[Bot] Warmup finished & teleport complete! Walking forward into the 0.5-block hole...\x1b[0m`);
+        addLog('SYSTEM', 'Teleport complete! Walking forward into AFK hole...');
 
         // Face straight forward
         try {
@@ -640,7 +651,7 @@ function startBot() {
             startJokeLoop(targetBot);
           }
         }, 2200);
-      }, 3000);
+      }, 6500); // 6.5 seconds for 5s server warmup!
     }, 4000);
   }
 
@@ -826,6 +837,30 @@ function startBot() {
           botState.inQueue = false;
           botState.status = 'In Hub (Waiting for Lifesteal)';
         }
+      }
+
+      // 6b. Detect if server cancels teleport request
+      if (raw.includes('Cancelled pending teleport request') || raw.includes('Cancelled pending teleport')) {
+        console.log(`\n\x1b[33m[Teleport Interrupted] Server cancelled teleport! Re-attempting /warp afkzone in 2.5s...\x1b[0m\n`);
+        addLog('SYSTEM', 'Teleport cancelled by server. Re-attempting in 2.5s...');
+        if (afkWalkTimeout) {
+          clearTimeout(afkWalkTimeout);
+          afkWalkTimeout = null;
+        }
+        try { bot.clearControlStates(); } catch {}
+        botState.hasWarpedAfk = false;
+        setTimeout(() => {
+          if (botState.inLifesteal && !botState.hasWarpedAfk) {
+            triggerAfkZoneSequence(bot);
+          }
+        }, 2500);
+      }
+
+      // 6c. Detect server teleport warmup notice
+      if (raw.includes('Teleporting in') && raw.includes('Do not move')) {
+        console.log(`\x1b[32m[Teleport Countdown] Server confirmed 5s warmup. Freezing all movement!\x1b[0m`);
+        addLog('SYSTEM', '5s teleport countdown active. Staying completely still...');
+        try { bot.clearControlStates(); } catch {}
       }
 
       // 7. If server announces AFK Zone entry
