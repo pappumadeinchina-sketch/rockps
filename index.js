@@ -21,7 +21,7 @@ const PROMOS = [
 const CONFIG = {
   host: process.env.MC_HOST || 'play.ashsmp.in',
   port: parseInt(process.env.MC_PORT, 10) || 25565,
-  username: process.env.MC_USERNAME || 'pappuchan',
+  username: process.env.MC_USERNAME || 'appuchan',
   version: '1.20.4',
   brand: 'vanilla',
   auth: 'offline',
